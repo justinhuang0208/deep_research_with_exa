@@ -11,7 +11,7 @@ from datetime import date
 import time
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-EXA_API_KEY = os.environ.get("EXA_API_KEY")
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
 RESEARCH_REPORT_FILE = "research_report.md"
 SEARCH_RESULTS_FILE = "search_results.md"
 SEARCH_RESULT_FILE_WITH_GLOBAL_CITATIONS = "search_results_with_global_citations.md"
@@ -27,6 +27,7 @@ client = OpenAI(
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
 def call_openrouter(prompt: str,
                     history: list,
                     model: str = DEFAULT_MODEL,
@@ -46,6 +47,8 @@ def call_openrouter(prompt: str,
                 return ""
 
             result = response.choices[0].message.content
+            if result is None:
+                result = ""
             history.append({"role": "assistant", "content": result})
             return result
 
@@ -55,40 +58,38 @@ def call_openrouter(prompt: str,
                 time.sleep(retry_delay)
             else:
                 return ""
+    return ""
 
-async def call_exa_async(session: aiohttp.ClientSession, query: str, main_goal: List[Dict], sub_question: str) -> Dict:
-    """Call Exa search"""
+async def call_tavily_async(session: aiohttp.ClientSession, query: str, main_goal: List[Dict], sub_question: str) -> Dict:
+    """Call Tavily search"""
     try:
-        url = 'https://api.exa.ai/search'
+        url = 'https://api.tavily.com/search'
         headers = {
-            'Authorization': f'Bearer {EXA_API_KEY}',
+            'Authorization': f'Bearer {TAVILY_API_KEY}',
             'Content-Type': 'application/json'
         }
         data = {
             "query": query,
-            "numResults": 3,
-            "contents": {
-                "text": True,
-                "livecrawl": "always"
-            }
+            "max_results": 3,
+            "include_raw_content": True
         }
 
-        async with session.post(url, headers=headers, json=data, timeout=120) as response:
+        async with session.post(url, headers=headers, json=data) as response:
             response.raise_for_status()
             result = await response.json()
 
-            results = result.get("results", [])
+            results = result.get('results', [])
             texts = []
             urls = []
             for index, item in enumerate(results):
-                if "text" in item:
+                if item.get('raw_content', ""):
                     texts.append(f"{index+1}.")
-                    texts.append(item["text"])
-                if "url" in item:
+                    texts.append(item["raw_content"])
+                if item.get('url', ""):
                     urls.append(item["url"])
             content = "\n".join(texts)
             system_prompt = f"""You are a part of deep research agant, and will be provided some website contents. Your goal is to synthesize and organize these content to answer the user query and the sub-question.
-                                The main goal of the research: {str(main_goal)}. The sub_question: {sub_question}
+                                <main_goal>{str(main_goal)}</main_goal> <sub_question>{sub_question}</sub_question>
                                 You need to cite the most relevant search results that answer the query. Do not mention any irrelevant results. You MUST ADHERE to the following instructions for citing search results:
                                 NO SPACE between the last word and the citation, and ALWAYS use brackets, like: [1] or [2][3]. Only use this format to cite search results. NEVER include a References section at the end of your answer.
                                 Use markdown headings level 3 and 4 to separate sections of your response, like "## Header", but NEVER start an answer with a heading or title of any kind.
@@ -101,7 +102,7 @@ async def call_exa_async(session: aiohttp.ClientSession, query: str, main_goal: 
                 "citations": urls
             }
     except Exception as e:
-        logger.error(f"Exa search error，query: '{query}'：{str(e)}")
+        logger.error(f"Tavily search error，query: '{query}'：{str(e)}")
         return {"query": query, "content": f"Search Error: {str(e)}", "citations": []}
 
 def save_search_result(query: str, result: Dict):
@@ -228,7 +229,7 @@ def analyze_task(query: str, history: List[Dict]) -> Dict:
         logger.error(f"Problematic response: {response}")
         return {"sub_questions": []} 
 
-async def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_goal, max_search_depth: int) -> Dict:
+async def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_goal, max_search_depth: int) -> List[str]:
     """Asyncronously execute dynamic search process (integrated result saving)"""
 
     search_queue = deque(sub_question["query"])
@@ -246,7 +247,7 @@ async def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_g
                     continue
 
                 print(f"Searching [{sub_question['question']}] - {query}")
-                tasks.append(call_exa_async(session, query, main_goal, sub_question['question']))
+                tasks.append(call_tavily_async(session, query, main_goal, sub_question['question']))
                 processed.add(query)
 
             api_responses = await asyncio.gather(*tasks)
@@ -256,11 +257,9 @@ async def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_g
                  
 
             if depth < max_search_depth and current_results:
-                analysis_prompt = f"""The main goal of the research is {main_goal}.
-                ## Sub Question:{sub_question['question']}
-                Synthesize the following results:
-                ## Current Search Results:
-                {current_results}
+                analysis_prompt = f"""<main_goal>{main_goal}</main_goal>
+                <sub_question>{sub_question['question']}</sub_question>
+                <current_results>{current_results}</current_results>
                 please generate:
                 1. Statement of supplementary search directions needed
                 2. New 1 to 3 search queries based on the statement of suplementary search directions needed, with concisely and detailed describe.
@@ -316,11 +315,11 @@ def generate_research_report(main_goal: List[Dict], processed_content: str) -> s
     
 def organize_search_results(search_results: List[Dict]) -> str:
     """Organize all the search results in the same sub-question"""
-    return
+    return ""
 
 def main_flow():
     
-    if not (EXA_API_KEY or OPENROUTER_API_KEY):
+    if not (TAVILY_API_KEY or OPENROUTER_API_KEY):
         logger.error("Please set the environment variables EXA_API_KEY and OPENROUTER_API_KEY.")
         return
 
@@ -342,7 +341,7 @@ def main_flow():
 
             async def get_initial_search():
                 async with aiohttp.ClientSession() as session:
-                    return await call_exa_async(session, user_query, [], "")
+                    return await call_tavily_async(session, user_query, [], "")
             
             init_search_result = asyncio.run(get_initial_search())
             init_search = init_search_result['content']
@@ -364,7 +363,7 @@ def main_flow():
             else:
                 break
         print("\n")
-        main_goal = list(conversation_history[-1])
+        main_goal = [conversation_history[-1]]
         
         # Task Analysis Stage
         print("===Analyzing research tasks===")
